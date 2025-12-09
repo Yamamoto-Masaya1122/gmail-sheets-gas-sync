@@ -4,11 +4,10 @@ function saveGmailToSheetBySenderWithDomainFilter() {
   // 環境変数取得
   const props = PropertiesService.getScriptProperties();
   const sheetId = props.getProperty('SPREADSHEET_ID');
-  const authUser = props.getProperty('AUTH_USER');
   const sheetManager = SpreadsheetApp.openById(sheetId);
-
   const lastFetchTime = props.getProperty('LAST_FETCH_TIME');
   const lastFetchIds = JSON.parse(props.getProperty('LAST_FETCH_IDS') || '[]');
+  const groupBaseUrl = props.getProperty('GROUP_BASE_URL');
 
   /**
    * 🔽 シート分類ルール（ここだけ編集すれば種別追加OK）
@@ -22,14 +21,20 @@ function saveGmailToSheetBySenderWithDomainFilter() {
     "インターネット関連": [
       "groups.google.com",
       "ambi-tious.com",
+      "googlegroups.com",
+      "hornet-v.com"
     ],
     "その他": [] // マッチしなかった時
   };
 
-  // Gmail検索クエリを生成
-  const allDomains = Object.values(categoryDomainMap).flat();
-
-  let query = `in:inbox (${allDomains.map(d => `from:${d}`).join(' OR ')})`;
+  // ✅ シート分類ルールに登録されている全ドメインを抽出（「その他」は除外）
+  const allDomains = Object.entries(categoryDomainMap)
+    .filter(([sheetName]) => sheetName !== "その他")
+    .flatMap(([_, domains]) => domains);
+  
+  // ✅ Gmail検索クエリを生成（送信元を限定）
+  let query = `in:inbox (${allDomains.map(d => `from:${d}`).join(" OR ")})`;
+  
   if (lastFetchTime) {
     query += ` after:${formatDateForQuery(lastFetchTime)}`;
   }
@@ -102,11 +107,14 @@ function saveGmailToSheetBySenderWithDomainFilter() {
       sheetWriteBuffer[sheetName] = [];
     }
 
-    // Gmailリンク生成
-    const gmailUrl = `https://mail.google.com/mail/?authuser=${authUser}#all/${msgId}`;
+    const subject = msg.getSubject();
+
+    // ✅ GoogleグループのスレッドURL
+    const groupThreadUrl = `${groupBaseUrl}${subject}`;
+
     const hyperlink =
       msg.getAttachments().length > 0
-        ? `=HYPERLINK("${gmailUrl}", "あり")`
+        ? `=HYPERLINK("${groupThreadUrl}", "あり")`
         : "なし";
 
     // 本文（高速化のため substring → replace の順）
@@ -120,7 +128,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
       "", "", "",
       msgDate,
       from,
-      msg.getSubject(),
+      subject,
       body,
       hyperlink,
       threadId,
@@ -235,61 +243,4 @@ function formatDateForQuery(dateString) {
   const d = new Date(dateString);
 
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-/**
- * D〜J列が編集されたら元の値に戻す（=HYPERLINK 完全対応・最終確定版）
- */
-function onEdit(e) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(200)) return;
-
-  try {
-    var range = e.range;
-    var editedCol = range.getColumn();
-    var editedRow = range.getRow();
-
-    // ✅ 対象は D〜J 列
-    if (editedCol < 4 || editedCol > 10) return;
-
-    // ✅ ヘッダー除外
-    if (editedRow === 1) return;
-
-    // ============================
-    // ✅ 復元の最優先は「数式」
-    // ============================
-    if (typeof e.oldFormula !== "undefined" && e.oldFormula !== "") {
-      range.setFormula(e.oldFormula);
-
-    // ============================
-    // ✅ 次にリッチテキストリンク
-    // ============================
-    } else {
-      var richText = range.getRichTextValue();
-      if (richText && richText.getLinkUrl()) {
-        range.setRichTextValue(richText);
-
-      // ============================
-      // ✅ 最後に通常の値
-      // ============================
-      } else if (typeof e.oldValue !== "undefined") {
-        range.setValue(e.oldValue);
-      }
-    }
-
-    // ✅ 表示形式はあなたの仕様どおり日付固定
-    range.setNumberFormat("yyyy/MM/dd");
-
-    // ✅ トースト通知
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      "この列（D〜J）は自動入力専用のため、手動編集はできません。",
-      "⚠ 編集禁止",
-      4
-    );
-
-  } catch (err) {
-    Logger.log("onEdit エラー: " + err);
-  } finally {
-    lock.releaseLock();
-  }
 }
