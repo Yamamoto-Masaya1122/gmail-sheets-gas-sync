@@ -10,7 +10,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
   const groupBaseUrl = props.getProperty('GROUP_BASE_URL');
 
   /**
-   * 🔽 シート分類ルール（ここだけ編集すれば種別追加OK）
+   * シート分類ルール（ここだけ編集すれば種別追加OK）
    * - key: シート名
    * - value: ドメインの配列
    */
@@ -27,14 +27,14 @@ function saveGmailToSheetBySenderWithDomainFilter() {
     "その他": [] // マッチしなかった時
   };
 
-  // ✅ シート分類ルールに登録されている全ドメインを抽出（「その他」は除外）
+  // シート分類ルールに登録されている全ドメインを抽出（「その他」は除外）
   const allDomains = Object.entries(categoryDomainMap)
     .filter(([sheetName]) => sheetName !== "その他")
     .flatMap(([_, domains]) => domains);
-  
-  // ✅ Gmail検索クエリを生成（送信元を限定）
+
+  // Gmail検索クエリを生成（シート分類に登録されている全ドメインを検索対象にする）
   let query = `in:inbox (${allDomains.map(d => `from:${d}`).join(" OR ")})`;
-  
+
   if (lastFetchTime) {
     query += ` after:${formatDateForQuery(lastFetchTime)}`;
   }
@@ -42,14 +42,14 @@ function saveGmailToSheetBySenderWithDomainFilter() {
   Logger.log("検索クエリ: " + query);
 
   /**
-   * ▼ 新着メッセージを正確に扱うため、
-   *   まず「最新50スレッド」を取得する
+   * 新着メッセージを正確に扱うため、
+   * まず「最新50スレッド」を取得する
    */
   const threads = GmailApp.search(query, 0, 50);
 
   /**
-   * ▼ スレッド内のメッセージをすべて展開 → 最新順にソート
-   *   その後、「最新50件のメッセージ」のみに絞り込む
+   * スレッド内のメッセージをすべて展開 → 最新順にソート
+   * その後、「最新50件のメッセージ」のみに絞り込む
    */
   let messages = [];
   threads.forEach(thread => {
@@ -71,13 +71,13 @@ function saveGmailToSheetBySenderWithDomainFilter() {
   let savedCount = 0;
 
   /**
-   * ▼ バッチ書き込み用バッファ
+   * バッチ書き込み用バッファ
    * sheetName: rowData[][]
    */
   const sheetWriteBuffer = {};
 
   /**
-   * ▼ メッセージ単位で処理
+   * メッセージ単位で処理
    */
   messages.forEach(({ thread, msg }) => {
     const msgDate = msg.getDate();
@@ -85,7 +85,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
     const from = msg.getFrom();
     const threadId = thread.getId();
 
-    // 🔹 重複チェック
+    // 重複チェック
     if (lastFetchTime) {
       const prev = new Date(lastFetchTime);
 
@@ -98,7 +98,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
       }
     }
 
-    // 🔹 ドメイン判定 → 書き込み先シート名を取得
+    // ドメイン判定 → 書き込み先シート名を取得
     const sheetName = categorizeSheet(from, categoryDomainMap);
     if (!sheetName) return;
 
@@ -109,8 +109,28 @@ function saveGmailToSheetBySenderWithDomainFilter() {
 
     const subject = msg.getSubject();
 
-    // ✅ GoogleグループのスレッドURL
-    const groupThreadUrl = `${groupBaseUrl}${subject}`;
+    // 送信日時（開始日 AND 終了日用）
+    const startDate = Utilities.formatDate(msgDate, "Asia/Tokyo", "yyyy-MM-dd");
+    const endDate = Utilities.formatDate(
+      new Date(msgDate.getTime() + 24 * 60 * 60 * 1000),
+      "Asia/Tokyo",
+      "yyyy-MM-dd"
+    );
+
+    /**
+     * GoogleグループのスレッドURL
+     * - 件名 AND after:送信日 AND before:送信日+1 AND has:attachment
+     * - 例:
+     *   subject:(転送確認) after:2025-12-09 before:2025-12-10 has:attachment
+     */
+    let groupQuery = `subject:(${subject}) after:${startDate} before:${endDate}`;
+
+    // 添付ありの場合のみ has:attachment を付与
+    if (msg.getAttachments().length > 0) {
+      groupQuery += " has:attachment";
+    }
+
+    const groupThreadUrl = `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
 
     const hyperlink =
       msg.getAttachments().length > 0
@@ -123,7 +143,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
       .substring(0, 50)
       .replace(/\r?\n/g, ' ');
 
-    // ▼ バッファに行データを追加
+    // バッファに行データを追加
     sheetWriteBuffer[sheetName].push([
       "", "", "",
       msgDate,
@@ -137,7 +157,7 @@ function saveGmailToSheetBySenderWithDomainFilter() {
 
     savedCount++;
 
-    // 🔹 基準日時の更新用
+    // 基準日時の更新用
     if (msgDate > newestTime) {
       newestTime = msgDate;
       newestIds = [msgId];
@@ -146,13 +166,13 @@ function saveGmailToSheetBySenderWithDomainFilter() {
     }
   });
 
-  // ▶▶ ここでまとめて一括書き込み
+  // ここでまとめて一括書き込み
   Object.entries(sheetWriteBuffer).forEach(([sheetName, rows]) => {
     if (rows.length === 0) return;
 
     let sheet = sheetManager.getSheetByName(sheetName);
 
-    // 🔹 シート作成（初回のみ）
+    // シート作成（初回のみ）
     if (!sheet) {
       sheet = sheetManager.insertSheet(sheetName);
       addHeaderRow(sheet);
@@ -160,16 +180,16 @@ function saveGmailToSheetBySenderWithDomainFilter() {
       protectAutoGeneratedColumns(sheet);
     }
 
-    // ✅ 常に「2行目」に挿入（最新が一番上）
+    // 常に「2行目」に挿入（最新が一番上）
     sheet.insertRowsBefore(2, rows.length);
 
-    // 🔥 バッチ一括書き込み（ここが高速化の肝）
+    // バッチ一括書き込み
     sheet
       .getRange(2, 1, rows.length, rows[0].length)
       .setValues(rows);
   });
 
-  // ✅ Script Properties 更新
+  // Script Properties 更新
   if (savedCount > 0) {
     props.setProperty('LAST_FETCH_TIME', newestTime.toISOString());
     props.setProperty('LAST_FETCH_IDS', JSON.stringify(newestIds));
