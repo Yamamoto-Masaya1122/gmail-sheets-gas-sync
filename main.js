@@ -1,0 +1,285 @@
+function saveGmailToSheetBySenderWithDomainFilter() {
+  const start = new Date();
+
+  // 環境変数取得
+  const props = PropertiesService.getScriptProperties();
+  const sheetId = props.getProperty('SPREADSHEET_ID');
+  const sheetManager = SpreadsheetApp.openById(sheetId);
+  const lastFetchTime = props.getProperty('LAST_FETCH_TIME');
+  const lastFetchIds = JSON.parse(props.getProperty('LAST_FETCH_IDS') || '[]');
+  const groupBaseUrl = props.getProperty('GROUP_BASE_URL');
+
+  /**
+   * シート分類ルール（ここだけ編集すれば種別追加OK）
+   * - key: シート名
+   * - value: ドメインの配列
+   */
+  const categoryDomainMap = {
+    "電気・ガス": [
+      "gmail.com",
+    ],
+    "インターネット関連": [
+      "groups.google.com",
+      "ambi-tious.com",
+      "googlegroups.com",
+      "hornet-v.com"
+    ],
+    "その他": [] // マッチしなかった時
+  };
+
+  // シート分類ルールに登録されている全ドメインを抽出（「その他」は除外）
+  const allDomains = Object.entries(categoryDomainMap)
+    .filter(([sheetName]) => sheetName !== "その他")
+    .flatMap(([_, domains]) => domains);
+
+  // Gmail検索クエリを生成（シート分類に登録されている全ドメインを検索対象にする）
+  let query = `in:inbox (${allDomains.map(d => `from:${d}`).join(" OR ")})`;
+
+  if (lastFetchTime) {
+    query += ` after:${formatDateForQuery(lastFetchTime)}`;
+  }
+
+  Logger.log("検索クエリ: " + query);
+
+  /**
+   * 新着メッセージを正確に扱うため、
+   * まず「最新50スレッド」を取得する
+   */
+  const threads = GmailApp.search(query, 0, 50);
+
+  /**
+   * スレッド内のメッセージをすべて展開 → 最新順にソート
+   * その後、「最新50件のメッセージ」のみに絞り込む
+   */
+  let messages = [];
+  threads.forEach(thread => {
+    thread.getMessages().forEach(msg => {
+      messages.push({ thread, msg });
+    });
+  });
+
+  // 新しい順に並べ替え
+  messages.sort((a, b) => b.msg.getDate() - a.msg.getDate());
+
+  // 最新50件に制御
+  messages = messages.slice(0, 50);
+
+  Logger.log(`抽出したメッセージ総数（50件に制御済）: ${messages.length}`);
+
+  let newestTime = lastFetchTime ? new Date(lastFetchTime) : new Date(0);
+  let newestIds = [];
+  let savedCount = 0;
+
+  /**
+   * バッチ書き込み用バッファ
+   * sheetName: rowData[][]
+   */
+  const sheetWriteBuffer = {};
+
+  /**
+   * メッセージ単位で処理
+   */
+  messages.forEach(({ thread, msg }) => {
+    const msgDate = msg.getDate();
+    const msgId = msg.getId();
+    const from = msg.getFrom();
+    const threadId = thread.getId();
+
+    // 重複チェック
+    if (lastFetchTime) {
+      const prev = new Date(lastFetchTime);
+
+      if (msgDate < prev) return;
+      if (
+        msgDate.getTime() === prev.getTime() &&
+        lastFetchIds.includes(msgId)
+      ) {
+        return;
+      }
+    }
+
+    // ドメイン判定 → 書き込み先シート名を取得
+    const sheetName = categorizeSheet(from, categoryDomainMap);
+    if (!sheetName) return;
+
+    // 書き込みバッファが存在しなければ初期化
+    if (!sheetWriteBuffer[sheetName]) {
+      sheetWriteBuffer[sheetName] = [];
+    }
+
+    const subject = msg.getSubject();
+
+    /**
+     * GoogleグループのスレッドURL
+     * - 件名 AND has:attachment
+     * - 例:
+     *   subject:(転送確認) has:attachment
+     */
+
+    const hasAttachment = msg.getAttachments().length > 0;
+    const hasSpace = subject.includes(" ");
+
+    // 件名 " のエスケープ
+    const safeSubject = subject.replace(/"/g, '\\"');
+
+    let groupQuery;
+    let groupThreadUrl;
+
+    if (hasAttachment && hasSpace) {
+      /**
+       * ▼ 添付あり AND 件名にスペースあり → 「含まれている語句」（検索バー方式）
+       *   - 件名全文を "..." で囲んで語句分割を防ぐ
+       */
+      groupQuery =
+        `"${safeSubject}" has:attachment`;
+
+      groupThreadUrl =
+        `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
+
+    } else {
+      /**
+       * ▼ 件名にスペースがない場合 or 添付なし → 従来の subject:(...) 方式
+       */
+      groupQuery =
+        `subject:(${safeSubject})`;
+
+      if (hasAttachment) {
+        groupQuery += " has:attachment";
+      }
+
+      groupThreadUrl =
+        `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
+    }
+
+    const hyperlink =
+      hasAttachment
+        ? `=HYPERLINK("${groupThreadUrl}", "あり")`
+        : "なし";
+
+    // 本文（高速化のため substring → replace の順）
+    const body = msg
+      .getPlainBody()
+      .substring(0, 50)
+      .replace(/\r?\n/g, ' ');
+
+    // バッファに行データを追加
+    sheetWriteBuffer[sheetName].push([
+      "", "", "",
+      msgDate,
+      from,
+      subject,
+      body,
+      hyperlink,
+      threadId,
+      msgId
+    ]);
+
+    savedCount++;
+
+    // 基準日時の更新用
+    if (msgDate > newestTime) {
+      newestTime = msgDate;
+      newestIds = [msgId];
+    } else if (msgDate.getTime() === newestTime.getTime()) {
+      newestIds.push(msgId);
+    }
+  });
+
+  // ここでまとめて一括書き込み
+  Object.entries(sheetWriteBuffer).forEach(([sheetName, rows]) => {
+    if (rows.length === 0) return;
+
+    let sheet = sheetManager.getSheetByName(sheetName);
+
+    // シート作成（初回のみ）
+    if (!sheet) {
+      sheet = sheetManager.insertSheet(sheetName);
+      addHeaderRow(sheet);
+
+      protectAutoGeneratedColumns(sheet);
+    }
+
+    // 常に「2行目」に挿入（最新が一番上）
+    sheet.insertRowsBefore(2, rows.length);
+
+    // バッチ一括書き込み
+    sheet
+      .getRange(2, 1, rows.length, rows[0].length)
+      .setValues(rows);
+  });
+
+  // Script Properties 更新
+  if (savedCount > 0) {
+    props.setProperty('LAST_FETCH_TIME', newestTime.toISOString());
+    props.setProperty('LAST_FETCH_IDS', JSON.stringify(newestIds));
+
+    Logger.log(`🆕 基準日時更新: ${newestTime}`);
+  }
+
+  Logger.log(
+    `処理完了: ${((new Date()) - start) / 1000} 秒（保存件数: ${savedCount} 件）`
+  );
+}
+
+/**
+ * メール From → シート名にマッピング
+ */
+function categorizeSheet(from, categoryDomainMap) {
+  const lower = from.toLowerCase();
+
+  for (const [sheetName, domains] of Object.entries(categoryDomainMap)) {
+    if (domains.some(domain => lower.includes(domain))) {
+      return sheetName;
+    }
+  }
+
+  // どれにも属さない → "その他" を返す仕様
+  return "その他";
+}
+
+/**
+ * このヘッダーはシート作成時に1回だけ挿入される
+ */
+function addHeaderRow(sheet) {
+  sheet.appendRow([
+    "対応確認",
+    "備考",
+    "対応者",
+    "送信日時",
+    "送信者",
+    "件名",
+    "本文",
+    "添付の有無",
+    "スレッドID",
+    "メッセージID"
+  ]);
+
+  sheet.setFrozenRows(1);
+}
+
+/**
+ * D〜J列を「オーナー含めて完全ロック（GAS専用）」にする
+ */
+function protectAutoGeneratedColumns(sheet) {
+  const range = sheet.getRange("D:J");
+  const protection = range
+    .protect()
+    .setDescription('Auto Mail Data Protected');
+
+  const me = Session.getEffectiveUser().getEmail();
+  protection.removeEditors(protection.getEditors());
+  protection.addEditor(me);
+  protection.setWarningOnly(false);
+
+  range.setBackground("#f3f3f3");
+}
+
+/**
+ * Gmail検索クエリの「after:」形式に合わせて日付を整形する。
+ * 例: "2024-12-01T12:00:00.000Z" → "2024/12/1"
+ */
+function formatDateForQuery(dateString) {
+  const d = new Date(dateString);
+
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+}
