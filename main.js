@@ -109,31 +109,50 @@ function saveGmailToSheetBySenderWithDomainFilter() {
 
     const subject = msg.getSubject();
 
-    // 送信日時（開始日 AND 終了日用）
-    const startDate = Utilities.formatDate(msgDate, "Asia/Tokyo", "yyyy-MM-dd");
-    const endDate = Utilities.formatDate(
-      new Date(msgDate.getTime() + 24 * 60 * 60 * 1000),
-      "Asia/Tokyo",
-      "yyyy-MM-dd"
-    );
-
     /**
      * GoogleグループのスレッドURL
-     * - 件名 AND after:送信日 AND before:送信日+1 AND has:attachment
+     * - 件名 AND has:attachment
      * - 例:
-     *   subject:(転送確認) after:2025-12-09 before:2025-12-10 has:attachment
+     *   subject:(転送確認) has:attachment
      */
-    let groupQuery = `subject:(${subject}) after:${startDate} before:${endDate}`;
 
-    // 添付ありの場合のみ has:attachment を付与
-    if (msg.getAttachments().length > 0) {
-      groupQuery += " has:attachment";
+    const hasAttachment = msg.getAttachments().length > 0;
+    const hasSpace = subject.includes(" ");
+
+    // 件名 " のエスケープ
+    const safeSubject = subject.replace(/"/g, '\\"');
+
+    let groupQuery;
+    let groupThreadUrl;
+
+    if (hasAttachment && hasSpace) {
+      /**
+       * ▼ 添付あり AND 件名にスペースあり → 「含まれている語句」（検索バー方式）
+       *   - 件名全文を "..." で囲んで語句分割を防ぐ
+       */
+      groupQuery =
+        `"${safeSubject}" has:attachment`;
+
+      groupThreadUrl =
+        `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
+
+    } else {
+      /**
+       * ▼ 件名にスペースがない場合 or 添付なし → 従来の subject:(...) 方式
+       */
+      groupQuery =
+        `subject:(${safeSubject})`;
+
+      if (hasAttachment) {
+        groupQuery += " has:attachment";
+      }
+
+      groupThreadUrl =
+        `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
     }
 
-    const groupThreadUrl = `${groupBaseUrl}${encodeURIComponent(groupQuery)}`;
-
     const hyperlink =
-      msg.getAttachments().length > 0
+      hasAttachment
         ? `=HYPERLINK("${groupThreadUrl}", "あり")`
         : "なし";
 
