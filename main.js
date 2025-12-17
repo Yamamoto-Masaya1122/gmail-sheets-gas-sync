@@ -9,23 +9,10 @@ function saveGmailToSheetBySenderWithDomainFilter() {
   const lastFetchIds = JSON.parse(props.getProperty('LAST_FETCH_IDS') || '[]');
   const groupBaseUrl = props.getProperty('GROUP_BASE_URL');
 
-  /**
-   * シート分類ルール（ここだけ編集すれば種別追加OK）
-   * - key: シート名
-   * - value: ドメインの配列
-   */
-  const categoryDomainMap = {
-    "電気・ガス": [
-      "gmail.com",
-    ],
-    "インターネット関連": [
-      "groups.google.com",
-      "ambi-tious.com",
-      "googlegroups.com",
-      "hornet-v.com"
-    ],
-    "その他": [] // マッチしなかった時
-  };
+  // シート分類ルール取得
+  const categoryDomainMap = JSON.parse(
+    props.getProperty('CATEGORY_DOMAIN_MAP') || '{}'
+  );
 
   // シート分類ルールに登録されている全ドメインを抽出（「その他」は除外）
   const allDomains = Object.entries(categoryDomainMap)
